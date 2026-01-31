@@ -19,13 +19,10 @@ MAP_FILES :=
 S_DEPS := 
 S_UPPER_DEPS := 
 C_DEPS := 
-OBJCOPY_BIN := 
 
 # Every subdirectory with source files must be described here
 SUBDIRS := \
-Application/Startup \
-Application/User \
-Drivers/BSP/STM32F4xx_Nucleo \
-Drivers/CMSIS \
-Drivers/STM32F4xx_HAL_Driver \
+Core/Src \
+Core/Startup \
+Drivers/STM32F4xx_HAL_Driver/Src \
 
