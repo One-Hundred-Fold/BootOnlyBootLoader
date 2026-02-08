@@ -1,0 +1,14 @@
+################################################################################
+# User makefile target - Post-build: create .srec from .elf
+################################################################################
+
+BootOnlyBootLoader.srec: $(EXECUTABLES)
+	arm-none-eabi-objcopy -O srec $(EXECUTABLES) BootOnlyBootLoader.srec
+	@echo 'Finished building target: BootOnlyBootLoader.srec'
+	@echo ' '
+
+secondary-outputs: BootOnlyBootLoader.srec
+
+clean: clean-srec
+clean-srec:
+	-$(RM) BootOnlyBootLoader.srec

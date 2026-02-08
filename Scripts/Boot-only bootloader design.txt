@@ -1,0 +1,15 @@
+In main.c, create a boot-only bootloader that will search flash memory sectors 1 through 7 for an application to run. The application will be identifed by a metadata structure in the sector, aligned to an 8-byte boundary, that has the following elements, in order.
+	An 8-byte magic number, 0xdeadbeefcafebabe.
+	An 8-byte inverted magic number, 0x2152411035014542.
+	An 8-byte validation flag, 0xffffffff00000000.
+	An 8-byte invalidation flag, 0x00ffffffffffffff.
+	A SHA256 digest of the contents of the sector, from its beginning up to, but not including, the meatadata SHA256 digest. The stored digest must match the digest to be calculated when the metadata structure candidate is found.
+On finding the first application that satifies the above conditions, which is Cortex-M4 firmware, the boot-only bootloader must set the vector table and MSP using the appropriate addresses found at the start of the sector, and then jump to the resedt handler.
+
+Move the search logic after the pre-existing calls to  HAL_Init, SystemClock_Config, MX_GPIO_Init, and MX_USART2_UART_Init. Obey the provided USER CODE BEGIN and USER CODE END comments. Before jumping to the found application, deinitialize GPIOs and UART2
+
+Change the magic, inverted_magic, validation, and invalidation fields of AppData_t from type uint64 to type char array. Change the related macro definitions to const char arrays, and update the code accordingly.
+
+The endianess of the characters arrays is incorrect; make them big-endian.
+
+Add a post-build step to create a .srec file from the .elf build artifact.

@@ -1,6 +1,10 @@
-../Core/Src/main.c:66:5:main	1
-../Core/Src/main.c:111:6:SystemClock_Config	3
-../Core/Src/main.c:157:13:MX_USART2_UART_Init	2
-../Core/Src/main.c:190:13:MX_GPIO_Init	1
-../Core/Src/main.c:273:6:Error_Handler	1
-../Core/Src/main.c:291:6:assert_failed	1
+../Core/Src/main.c:109:13:sha256_compute	17
+../Core/Src/main.c:229:12:bootloader_try_launch_app	10
+../Core/Src/main.c:264:13:bootloader_jump_to_app	8
+../Core/Src/main.c:388:5:main	1
+../Core/Src/main.c:439:6:SystemClock_Config	3
+../Core/Src/main.c:485:13:MX_USART1_UART_Init	2
+../Core/Src/main.c:518:13:MX_USART2_UART_Init	2
+../Core/Src/main.c:551:13:MX_GPIO_Init	1
+../Core/Src/main.c:624:6:Error_Handler	1
+../Core/Src/main.c:642:6:assert_failed	1
