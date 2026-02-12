@@ -34,6 +34,8 @@ typedef struct __attribute__((packed, aligned(8))) {
   char inverted_magic[8];  /* 0x2152411035014542 */
   char validation[8];      /* 0xffffffff00000000 */
   char invalidation[8];    /* 0x00ffffffffffffff */
+  uint32_t dest_address;   /* Destination address in flash (LE) where app should be loaded */
+  uint32_t size;           /* Size of application including SHA256 digest (LE) */
   uint8_t  sha256[32];     /* SHA256 of sector from start to this field */
 } AppMetadata_t;
 

@@ -27,25 +27,25 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   ALLOC
  11 .ARM.attributes 00000030  00000000  00000000  0000500c  2**0
                   CONTENTS, READONLY
- 12 .debug_info   00007a2f  00000000  00000000  0000503c  2**0
+ 12 .debug_info   00007a49  00000000  00000000  0000503c  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 13 .debug_abbrev 00001436  00000000  00000000  0000ca6b  2**0
+ 13 .debug_abbrev 00001436  00000000  00000000  0000ca85  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 14 .debug_aranges 00000650  00000000  00000000  0000dea8  2**3
+ 14 .debug_aranges 00000650  00000000  00000000  0000dec0  2**3
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 15 .debug_rnglists 000004d8  00000000  00000000  0000e4f8  2**0
+ 15 .debug_rnglists 000004d8  00000000  00000000  0000e510  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 16 .debug_macro  00015259  00000000  00000000  0000e9d0  2**0
+ 16 .debug_macro  00015259  00000000  00000000  0000e9e8  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 17 .debug_line   00008511  00000000  00000000  00023c29  2**0
+ 17 .debug_line   00008511  00000000  00000000  00023c41  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 18 .debug_str    00084e2c  00000000  00000000  0002c13a  2**0
+ 18 .debug_str    00084e39  00000000  00000000  0002c152  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 19 .comment      00000043  00000000  00000000  000b0f66  2**0
+ 19 .comment      00000043  00000000  00000000  000b0f8b  2**0
                   CONTENTS, READONLY
- 20 .debug_frame  00001904  00000000  00000000  000b0fac  2**2
+ 20 .debug_frame  00001904  00000000  00000000  000b0fd0  2**2
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 21 .debug_line_str 00000048  00000000  00000000  000b28b0  2**0
+ 21 .debug_line_str 00000048  00000000  00000000  000b28d4  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
 
 Disassembly of section .text:
@@ -1527,7 +1527,7 @@ static int bootloader_try_launch_app(void)
       /* Metadata found - verify SHA256: sector from start up to (but not including) digest field */
       uint32_t hash_len = offset + (uint32_t)offsetof(AppMetadata_t, sha256);
  80011be:	6c3b      	ldr	r3, [r7, #64]	@ 0x40
- 80011c0:	3320      	adds	r3, #32
+ 80011c0:	3328      	adds	r3, #40	@ 0x28
  80011c2:	627b      	str	r3, [r7, #36]	@ 0x24
       uint8_t computed[32];
       sha256_compute(sector, hash_len, computed);
@@ -1552,7 +1552,7 @@ static int bootloader_try_launch_app(void)
  80011e2:	6ab9      	ldr	r1, [r7, #40]	@ 0x28
  80011e4:	6bbb      	ldr	r3, [r7, #56]	@ 0x38
  80011e6:	440b      	add	r3, r1
- 80011e8:	3320      	adds	r3, #32
+ 80011e8:	3328      	adds	r3, #40	@ 0x28
  80011ea:	781b      	ldrb	r3, [r3, #0]
  80011ec:	429a      	cmp	r2, r3
  80011ee:	d002      	beq.n	80011f6 <bootloader_try_launch_app+0xba>
@@ -1596,7 +1596,7 @@ static int bootloader_try_launch_app(void)
  8001224:	3308      	adds	r3, #8
  8001226:	643b      	str	r3, [r7, #64]	@ 0x40
  8001228:	6c3b      	ldr	r3, [r7, #64]	@ 0x40
- 800122a:	3340      	adds	r3, #64	@ 0x40
+ 800122a:	3348      	adds	r3, #72	@ 0x48
  800122c:	6b3a      	ldr	r2, [r7, #48]	@ 0x30
  800122e:	429a      	cmp	r2, r3
  8001230:	d29a      	bcs.n	8001168 <bootloader_try_launch_app+0x2c>
