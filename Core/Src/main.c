@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdio.h>
+#include "stm32f4xx_hal_flash.h"
+#include "stm32f4xx_hal_flash_ex.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,10 +34,12 @@
 typedef struct __attribute__((packed, aligned(8))) {
   char magic[8];           /* 0xdeadbeefcafebabe */
   char inverted_magic[8];  /* 0x2152411035014542 */
+  char app_name[8];        /* Application name */
+  char version[8];         /* Version string */
+  uint8_t dest_address[4]; /* Destination flash sector address, little-endian */
+  uint8_t size[4];         /* Application size including metadata, little-endian */
   char validation[8];      /* 0xffffffff00000000 */
   char invalidation[8];    /* 0x00ffffffffffffff */
-  uint32_t dest_address;   /* Destination address in flash (LE) where app should be loaded */
-  uint32_t size;           /* Size of application including SHA256 digest (LE) */
   uint8_t  sha256[32];     /* SHA256 of sector from start to this field */
 } AppMetadata_t;
 
@@ -54,7 +58,7 @@ typedef struct __attribute__((packed, aligned(8))) {
 #define APP_METADATA_MAGIC     "\xde\xad\xbe\xef\xca\xfe\xba\xbe"
 #define APP_METADATA_INV_MAGIC "\x21\x52\x41\x10\x35\x01\x45\x42"
 #define APP_METADATA_VALID     "\xff\xff\xff\xff\x00\x00\x00\x00"
-#define APP_METADATA_INVALID   "\x00\xff\xff\xff\xff\xff\xff\xff"
+#define APP_METADATA_INVALID   "\x00\x00\x00\x00\xff\xff\xff\xff"
 #define APP_METADATA_FIELD_LEN 8
 
 /* Sector start addresses and sizes for STM32F401RE */
@@ -72,6 +76,10 @@ static const struct {
 };
 
 #define NUM_APP_SECTORS (sizeof(SECTOR_INFO)/sizeof(SECTOR_INFO[0]))
+
+#define SECTOR_6_INDEX  5   /* SECTOR_INFO index for flash sector 6 */
+#define STAGING_SECTOR_START  (SECTOR_INFO[SECTOR_6_INDEX].start)
+#define STAGING_SECTOR_SIZE   (SECTOR_INFO[SECTOR_6_INDEX].size)
 
 /* USER CODE END PD */
 
@@ -98,6 +106,7 @@ static void MX_USART1_UART_Init(void);
 static void sha256_compute(const uint8_t *data, uint32_t len, uint8_t *digest);
 static int bootloader_try_launch_app(void);
 static void bootloader_jump_to_app(uint32_t app_base);
+static int bootloader_handle_staging(void);
 
 /* USER CODE END PFP */
 
@@ -225,6 +234,116 @@ static void sha256_compute(const uint8_t *data, uint32_t total_len, uint8_t *dig
     digest[j*4 + 2] = (uint8_t)(H[j] >> 8);
     digest[j*4 + 3] = (uint8_t)(H[j]);
   }
+}
+
+/* Map flash address to sector number for STM32F401RE */
+static uint32_t flash_addr_to_sector(uint32_t addr)
+{
+  if (addr < 0x08004000UL) return FLASH_SECTOR_0;
+  if (addr < 0x08008000UL) return FLASH_SECTOR_1;
+  if (addr < 0x0800C000UL) return FLASH_SECTOR_2;
+  if (addr < 0x08010000UL) return FLASH_SECTOR_3;
+  if (addr < 0x08020000UL) return FLASH_SECTOR_4;
+  if (addr < 0x08040000UL) return FLASH_SECTOR_5;
+  if (addr < 0x08060000UL) return FLASH_SECTOR_6;
+  return FLASH_SECTOR_7;
+}
+
+/* Check sector 6 for staging metadata; if found, copy app to destination, update validation, erase sector 6, reboot. */
+/* Returns 1 if staging was handled (never returns - reboots), 0 if no staging metadata found. */
+static int bootloader_handle_staging(void)
+{
+  const uint8_t *sector6 = (const uint8_t *)STAGING_SECTOR_START;
+
+  /* Search sector 6 for metadata with magic and inverted_magic only */
+  for (uint32_t offset = 0; offset + sizeof(AppMetadata_t) <= STAGING_SECTOR_SIZE; offset += 8) {
+    const AppMetadata_t *meta = (const AppMetadata_t *)(sector6 + offset);
+
+    if (memcmp(meta->magic, APP_METADATA_MAGIC, APP_METADATA_FIELD_LEN) != 0) continue;
+    if (memcmp(meta->inverted_magic, APP_METADATA_INV_MAGIC, APP_METADATA_FIELD_LEN) != 0) continue;
+
+    /* Staging metadata found - extract dest_address and size (little-endian) */
+    uint32_t dest_addr = (uint32_t)meta->dest_address[0] | ((uint32_t)meta->dest_address[1] << 8) |
+                         ((uint32_t)meta->dest_address[2] << 16) | ((uint32_t)meta->dest_address[3] << 24);
+    uint32_t app_size = (uint32_t)meta->size[0] | ((uint32_t)meta->size[1] << 8) |
+                        ((uint32_t)meta->size[2] << 16) | ((uint32_t)meta->size[3] << 24);
+
+    /* Validate destination is within app sectors (1-7) and not sector 6 (source) */
+    if (dest_addr < 0x08004000UL || dest_addr > 0x0807FFFFUL) continue;
+    if (dest_addr >= 0x08040000UL && dest_addr < 0x08060000UL) continue;  /* reject sector 6 */
+    if (app_size == 0 || app_size > STAGING_SECTOR_SIZE) continue;
+
+    /* Erase destination sector */
+    uint32_t sector_num = flash_addr_to_sector(dest_addr);
+    FLASH_EraseInitTypeDef erase = {
+      .TypeErase = FLASH_TYPEERASE_SECTORS,
+      .Banks = FLASH_BANK_1,
+      .Sector = sector_num,
+      .NbSectors = 1,
+      .VoltageRange = FLASH_VOLTAGE_RANGE_3,
+    };
+    uint32_t sector_error;
+
+    HAL_FLASH_Unlock();
+    if (HAL_FLASHEx_Erase(&erase, &sector_error) != HAL_OK) {
+      HAL_FLASH_Lock();
+      continue;
+    }
+
+    /* Copy application from sector 6 to destination (8 bytes at a time for doubleword alignment) */
+    const uint8_t *src = sector6;
+    uint32_t dst = dest_addr;
+    int copy_ok = 1;
+    for (uint32_t i = 0; i < app_size && copy_ok; i += 8) {
+      uint32_t chunk = (i + 8 <= app_size) ? 8 : (app_size - i);
+      uint64_t data = 0;
+      for (uint32_t j = 0; j < chunk; j++) {
+        data |= (uint64_t)src[i + j] << (j * 8);
+      }
+      if (chunk == 8) {
+        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, dst + i, data) != HAL_OK) {
+          copy_ok = 0;
+        }
+      } else {
+        /* Last partial chunk - program as bytes or halfwords */
+        for (uint32_t j = 0; j < chunk && copy_ok; j += 4) {
+          uint32_t w = 0;
+          uint32_t n = (j + 4 <= chunk) ? 4 : (chunk - j);
+          for (uint32_t k = 0; k < n; k++) w |= (uint32_t)src[i + j + k] << (k * 8);
+          if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, dst + i + j, w) != HAL_OK) copy_ok = 0;
+        }
+      }
+    }
+    if (!copy_ok) {
+      HAL_FLASH_Lock();
+      continue;
+    }
+
+    /* Rewrite validation flag to 0xffffffff00000000 (big-endian) at destination metadata */
+    uint32_t validation_addr = dest_addr + offset + (uint32_t)offsetof(AppMetadata_t, validation);
+    /* For LE storage: 0x00000000ffffffff stores as ff ff ff ff 00 00 00 00 in memory */
+    uint64_t validation_val = 0x00000000ffffffffULL;
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, validation_addr, validation_val) != HAL_OK) {
+      HAL_FLASH_Lock();
+      continue;
+    }
+
+    /* Erase sector 6 */
+    FLASH_EraseInitTypeDef erase6 = {
+      .TypeErase = FLASH_TYPEERASE_SECTORS,
+      .Banks = FLASH_BANK_1,
+      .Sector = FLASH_SECTOR_6,
+      .NbSectors = 1,
+      .VoltageRange = FLASH_VOLTAGE_RANGE_3,
+    };
+    HAL_FLASHEx_Erase(&erase6, &sector_error);
+    HAL_FLASH_Lock();
+
+    /* Reboot */
+    HAL_NVIC_SystemReset();
+    /* never returns */
+  }
+  return 0;
 }
 
 /* Search for valid application and launch. Returns 1 if launched (never returns), 0 if not found. */
@@ -415,6 +534,11 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+
+  /* First check sector 6 for staging metadata; if found, copy to dest, erase sector 6, reboot */
+  if (bootloader_handle_staging()) {
+    /* Never returns - reboots */
+  }
 
   /* Bootloader: search sectors 1-7 for application and launch */
   if (bootloader_try_launch_app()) {
