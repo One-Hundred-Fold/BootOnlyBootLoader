@@ -53,7 +53,7 @@
 ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:2970:10:HAL_UART_GetError	1
 ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:3263:19:UART_Start_Receive_IT	2
 ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:1347:19:HAL_UART_Receive_IT	4
-../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:1721:19:HAL_UARTEx_ReceiveToIdle_IT	7
+../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:1721:19:HAL_UARTEx_ReceiveToIdle_IT	6
 ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:3298:19:UART_Start_Receive_DMA	6
 ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:1449:19:HAL_UART_Receive_DMA	4
 ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c:1781:19:HAL_UARTEx_ReceiveToIdle_DMA	6

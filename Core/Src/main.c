@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include "stm32f4xx_hal_flash.h"
 #include "stm32f4xx_hal_flash_ex.h"
 /* USER CODE END Includes */
@@ -256,17 +257,50 @@ static int bootloader_handle_staging(void)
   const uint8_t *sector6 = (const uint8_t *)STAGING_SECTOR_START;
 
   /* Search sector 6 for metadata with magic and inverted_magic only */
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Checking sector starting at %p\r\n", sector6);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
   for (uint32_t offset = 0; offset + sizeof(AppMetadata_t) <= STAGING_SECTOR_SIZE; offset += 8) {
     const AppMetadata_t *meta = (const AppMetadata_t *)(sector6 + offset);
 
     if (memcmp(meta->magic, APP_METADATA_MAGIC, APP_METADATA_FIELD_LEN) != 0) continue;
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Magic number found at %p\r\n", meta->magic);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
     if (memcmp(meta->inverted_magic, APP_METADATA_INV_MAGIC, APP_METADATA_FIELD_LEN) != 0) continue;
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Inverted Magic number found at %p\r\n", meta->inverted_magic);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
 
     /* Staging metadata found - extract dest_address and size (little-endian) */
     uint32_t dest_addr = (uint32_t)meta->dest_address[0] | ((uint32_t)meta->dest_address[1] << 8) |
                          ((uint32_t)meta->dest_address[2] << 16) | ((uint32_t)meta->dest_address[3] << 24);
     uint32_t app_size = (uint32_t)meta->size[0] | ((uint32_t)meta->size[1] << 8) |
                         ((uint32_t)meta->size[2] << 16) | ((uint32_t)meta->size[3] << 24);
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Destination %p size %lu\r\n", (void*) dest_addr, app_size);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
 
     /* Validate destination is within app sectors (1-7) and not sector 6 (source) */
     if (dest_addr < 0x08004000UL || dest_addr > 0x0807FFFFUL) continue;
@@ -275,6 +309,16 @@ static int bootloader_handle_staging(void)
 
     /* Erase destination sector */
     uint32_t sector_num = flash_addr_to_sector(dest_addr);
+
+    #if BOOTLOADER_DEBUG_ENABLE
+	{
+		char dbg_msg[128];
+		int len = sprintf(dbg_msg, "Erasing destination (sector %lu)\r\n", sector_num);
+		HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+	}
+#endif
+
+    /* Erase destination sector */
     FLASH_EraseInitTypeDef erase = {
       .TypeErase = FLASH_TYPEERASE_SECTORS,
       .Banks = FLASH_BANK_1,
@@ -285,48 +329,343 @@ static int bootloader_handle_staging(void)
     uint32_t sector_error;
 
     HAL_FLASH_Unlock();
+    
+    /* Clear any pending error flags before erase */
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | 
+                           FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+    
+    /* Ensure flash is not busy before erase */
+    while (__HAL_FLASH_GET_FLAG(FLASH_FLAG_BSY) != RESET) {
+      /* Wait for any pending flash operations to complete */
+    }
+    
     if (HAL_FLASHEx_Erase(&erase, &sector_error) != HAL_OK) {
       HAL_FLASH_Lock();
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    uint32_t error = HAL_FLASH_GetError();
+    int len = sprintf(dbg_msg, "Erasing destination FAILED: error=0x%08lX, sector_error=0x%08lX\r\n",
+                      (unsigned long)error, (unsigned long)sector_error);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
       continue;
     }
+    
+    /* Verify erase completed and flash is ready */
+    uint32_t erase_timeout = 100000;
+    while (__HAL_FLASH_GET_FLAG(FLASH_FLAG_BSY) != RESET && erase_timeout--) {
+      /* Wait for erase to complete */
+    }
+    
+    /* Clear ALL error flags after erase */
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | 
+                           FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+    
+    /* Clear PG bit if it's set */
+    CLEAR_BIT(FLASH->CR, FLASH_CR_PG);
+    
+    /* Wait for everything to settle */
+    __DSB();
+    volatile uint32_t settle_delay = 100;
+    while (settle_delay--) { __NOP(); }
+    
+    /* Verify flash is unlocked and ready */
+    if (READ_BIT(FLASH->CR, FLASH_CR_LOCK) != RESET) {
+      /* Flash got locked somehow - unlock it again */
+      HAL_FLASH_Unlock();
+    }
+    
+    /* Verify erase was successful by checking first few bytes are 0xFF */
+    const uint32_t *verify_addr = (const uint32_t *)dest_addr;
+    if (verify_addr[0] != 0xFFFFFFFF || verify_addr[1] != 0xFFFFFFFF) {
+      HAL_FLASH_Lock();
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Erase verification FAILED: 0x%08lX 0x%08lX (expected 0xFFFFFFFF)\r\n",
+                      (unsigned long)verify_addr[0], (unsigned long)verify_addr[1]);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+      continue;
+    }
+    
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Erase completed and verified, flash ready, CR=0x%08lX, SR=0x%08lX\r\n",
+                      (unsigned long)FLASH->CR, (unsigned long)FLASH->SR);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Copying found application to destination\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
 
     /* Copy application from sector 6 to destination (8 bytes at a time for doubleword alignment) */
-    const uint8_t *src = sector6;
-    uint32_t dst = dest_addr;
-    int copy_ok = 1;
-    for (uint32_t i = 0; i < app_size && copy_ok; i += 8) {
-      uint32_t chunk = (i + 8 <= app_size) ? 8 : (app_size - i);
-      uint64_t data = 0;
-      for (uint32_t j = 0; j < chunk; j++) {
-        data |= (uint64_t)src[i + j] << (j * 8);
+    /* Ensure destination address is 8-byte aligned for doubleword programming */
+    if ((dest_addr & 7) != 0) {
+      HAL_FLASH_Lock();
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Destination address not 8-byte aligned: %p\r\n", (void*)dest_addr);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+      continue;
+    }
+    
+    /* Disable instruction cache and prefetch buffer to prevent read-while-write conflicts.
+       The cache and prefetch can cause the first flash program operation to fail if
+       they're trying to read cached/prefetched data while programming. */
+    __HAL_FLASH_INSTRUCTION_CACHE_DISABLE();
+    __HAL_FLASH_INSTRUCTION_CACHE_RESET();
+    __HAL_FLASH_PREFETCH_BUFFER_DISABLE();
+    __DSB(); /* Ensure cache operations complete before proceeding */
+    __ISB(); /* Ensure instruction pipeline is flushed */
+    
+    /* Ensure flash is still unlocked before starting */
+    if (READ_BIT(FLASH->CR, FLASH_CR_LOCK) != RESET) {
+      HAL_FLASH_Unlock();
+    }
+    
+    /* Aggressively clear flash controller state before starting programming */
+    /* Wait for BSY to clear */
+    uint32_t ready_timeout = 100000;
+    while (__HAL_FLASH_GET_FLAG(FLASH_FLAG_BSY) != RESET && ready_timeout--) {
+      /* Wait for any pending flash operations to complete */
+    }
+    
+    /* Clear PG bit */
+    CLEAR_BIT(FLASH->CR, FLASH_CR_PG);
+    
+    /* Clear ALL error flags */
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | 
+                           FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+    
+    /* Wait for everything to settle */
+    __DSB();
+    __ISB();
+    volatile uint32_t delay = 200;
+    while (delay--) { __NOP(); }
+    
+    /* Verify flash is in clean state */
+    if (__HAL_FLASH_GET_FLAG(FLASH_FLAG_BSY) != RESET || 
+        READ_BIT(FLASH->CR, FLASH_CR_PG) != RESET) {
+#if BOOTLOADER_DEBUG_ENABLE
+      {
+        char dbg_msg[128];
+        int len = sprintf(dbg_msg, "ERROR: Flash not in clean state before copy: CR=0x%08lX, SR=0x%08lX\r\n",
+                          (unsigned long)FLASH->CR, (unsigned long)FLASH->SR);
+        HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
       }
-      if (chunk == 8) {
-        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, dst + i, data) != HAL_OK) {
-          copy_ok = 0;
+#endif
+      HAL_FLASH_Lock();
+      continue;
+    }
+    
+    /* Copy source data from flash to RAM buffer in chunks to avoid read-while-write conflicts.
+       The STM32F4 flash controller may not handle simultaneous read and write operations
+       even when they target different sectors. Reading from flash while programming
+       flash can cause the first program operation to fail. We use a 4096-byte buffer
+       and process the copy in chunks to avoid using too much RAM.
+       Use static to avoid stack overflow issues. */
+    #define COPY_CHUNK_SIZE 4096
+    static uint8_t ram_buffer[COPY_CHUNK_SIZE];
+    
+    /* Destination must be 4-byte aligned for WORD programming on STM32F401 */
+    if ((dest_addr & 3) != 0) {
+#if BOOTLOADER_DEBUG_ENABLE
+      {
+        char dbg_msg[128];
+        int len = sprintf(dbg_msg, "ERROR: Destination address 0x%08lX is not 4-byte aligned\r\n",
+                          (unsigned long)dest_addr);
+        HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+      }
+#endif
+      HAL_FLASH_Lock();
+      continue;
+    }
+    
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Starting copy: dest=0x%08lX, size=%lu, flash CR=0x%08lX\r\n",
+                      (unsigned long)dest_addr, (unsigned long)app_size, (unsigned long)FLASH->CR);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+    
+    uint32_t dst = dest_addr;
+    int copy_ok = true;
+    
+    /* Process the copy in chunks of up to 4096 bytes */
+    for (uint32_t offset = 0; offset < app_size && copy_ok; offset += COPY_CHUNK_SIZE) {
+      uint32_t chunk_size = (offset + COPY_CHUNK_SIZE <= app_size) ? COPY_CHUNK_SIZE : (app_size - offset);
+      
+      /* Copy chunk from flash to RAM buffer */
+      memcpy(ram_buffer, sector6 + offset, chunk_size);
+      __DSB(); /* Ensure memory copy completes before proceeding */
+      
+      /* Program this chunk from RAM buffer to flash destination using WORD writes */
+      const uint8_t *src = ram_buffer;
+      uint32_t full_words = chunk_size / 4U;
+      uint32_t rem = chunk_size % 4U;
+
+      for (uint32_t w = 0; w < full_words && copy_ok; w++) {
+        uint32_t addr = dst + offset + (w * 4U);
+        uint32_t data_word =
+            ((uint32_t)src[w * 4U + 0U] << 0)  |
+            ((uint32_t)src[w * 4U + 1U] << 8)  |
+            ((uint32_t)src[w * 4U + 2U] << 16) |
+            ((uint32_t)src[w * 4U + 3U] << 24);
+
+#if BOOTLOADER_DEBUG_ENABLE
+        if (offset == 0 && w == 0) {
+          char dbg_msg[128];
+          int len = sprintf(dbg_msg, "First word: addr=0x%08lX data=0x%08lX bytes=%02X%02X%02X%02X\r\n",
+                            (unsigned long)addr, (unsigned long)data_word,
+                            src[0], src[1], src[2], src[3]);
+          HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
         }
-      } else {
-        /* Last partial chunk - program as bytes or halfwords */
-        for (uint32_t j = 0; j < chunk && copy_ok; j += 4) {
-          uint32_t w = 0;
-          uint32_t n = (j + 4 <= chunk) ? 4 : (chunk - j);
-          for (uint32_t k = 0; k < n; k++) w |= (uint32_t)src[i + j + k] << (k * 8);
-          if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, dst + i + j, w) != HAL_OK) copy_ok = 0;
+#endif
+
+        __disable_irq();
+        HAL_SuspendTick();
+        HAL_StatusTypeDef status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, data_word);
+        HAL_ResumeTick();
+        __enable_irq();
+
+        if (status != HAL_OK) {
+          copy_ok = false;
+#if BOOTLOADER_DEBUG_ENABLE
+          {
+            char dbg_msg[160];
+            uint32_t error = HAL_FLASH_GetError();
+            uint32_t flash_sr = FLASH->SR;
+            int len = sprintf(dbg_msg, "FLASH WORD Program FAILED: status=%d error=0x%08lX SR=0x%08lX addr=0x%08lX\r\n",
+                              status, (unsigned long)error, (unsigned long)flash_sr, (unsigned long)addr);
+            HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+          }
+#endif
+        }
+      }
+
+      /* Trailing bytes within this chunk */
+      if (rem && copy_ok) {
+        uint32_t tail_addr = dst + offset + (full_words * 4U);
+        uint32_t base = full_words * 4U;
+
+        if (rem >= 2U) {
+          uint16_t half = (uint16_t)src[base + 0U] | ((uint16_t)src[base + 1U] << 8);
+          __disable_irq();
+          HAL_SuspendTick();
+          HAL_StatusTypeDef status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, tail_addr, half);
+          HAL_ResumeTick();
+          __enable_irq();
+          if (status != HAL_OK) copy_ok = false;
+          tail_addr += 2U;
+          base += 2U;
+          rem -= 2U;
+        }
+        if (rem == 1U && copy_ok) {
+          uint8_t b = src[base];
+          __disable_irq();
+          HAL_SuspendTick();
+          HAL_StatusTypeDef status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, tail_addr, b);
+          HAL_ResumeTick();
+          __enable_irq();
+          if (status != HAL_OK) copy_ok = false;
         }
       }
     }
+    
+    /* Re-enable instruction cache and prefetch buffer after programming */
+    __DSB(); /* Ensure all flash operations complete before re-enabling cache */
+    __HAL_FLASH_INSTRUCTION_CACHE_ENABLE();
+    __HAL_FLASH_PREFETCH_BUFFER_ENABLE();
+    
     if (!copy_ok) {
       HAL_FLASH_Lock();
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Copying application FAILED\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
       continue;
     }
 
-    /* Rewrite validation flag to 0xffffffff00000000 (big-endian) at destination metadata */
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Setting validation flag to valid\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
+    /* Rewrite validation flag at destination metadata.
+       On STM32F401, use 32-bit WORD programming (avoid DOUBLEWORD). */
     uint32_t validation_addr = dest_addr + offset + (uint32_t)offsetof(AppMetadata_t, validation);
-    /* For LE storage: 0x00000000ffffffff stores as ff ff ff ff 00 00 00 00 in memory */
-    uint64_t validation_val = 0x00000000ffffffffULL;
-    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, validation_addr, validation_val) != HAL_OK) {
+    if ((validation_addr & 3U) != 0U) {
       HAL_FLASH_Lock();
+#if BOOTLOADER_DEBUG_ENABLE
+      {
+        char dbg_msg[128];
+        int len = sprintf(dbg_msg, "Setting validation flag FAILED (addr not 4-byte aligned): 0x%08lX\r\n",
+                          (unsigned long)validation_addr);
+        HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+      }
+#endif
       continue;
     }
+
+    /* Desired bytes in flash: FF FF FF FF 00 00 00 00 */
+    uint32_t validation_word0 = 0xFFFFFFFFU;
+    uint32_t validation_word1 = 0x00000000U;
+
+    __disable_irq();
+    HAL_SuspendTick();
+    HAL_StatusTypeDef v0 = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, validation_addr + 0U, validation_word0);
+    HAL_StatusTypeDef v1 = HAL_OK;
+    if (v0 == HAL_OK) {
+      v1 = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, validation_addr + 4U, validation_word1);
+    }
+    HAL_ResumeTick();
+    __enable_irq();
+
+    if (v0 != HAL_OK || v1 != HAL_OK) {
+      HAL_FLASH_Lock();
+
+      #if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    uint32_t error = HAL_FLASH_GetError();
+    int len = sprintf(dbg_msg, "Setting validation flag FAILED (v0=%d v1=%d err=0x%08lX addr=0x%08lX)\r\n",
+                      (int)v0, (int)v1, (unsigned long)error, (unsigned long)validation_addr);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
+      continue;
+    }
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Erasing staging sector %d\r\n", FLASH_SECTOR_6);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
 
     /* Erase sector 6 */
     FLASH_EraseInitTypeDef erase6 = {
@@ -336,7 +675,16 @@ static int bootloader_handle_staging(void)
       .NbSectors = 1,
       .VoltageRange = FLASH_VOLTAGE_RANGE_3,
     };
-    HAL_FLASHEx_Erase(&erase6, &sector_error);
+    if (HAL_FLASHEx_Erase(&erase6, &sector_error) != HAL_OK)
+    {
+#if BOOTLOADER_DEBUG_ENABLE
+	  {
+		char dbg_msg[128];
+		int len = sprintf(dbg_msg, "Erasing staging sectoFAILED\r\n");
+		HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+	  }
+#endif
+    }
     HAL_FLASH_Lock();
 
     /* Reboot */
@@ -354,21 +702,87 @@ static int bootloader_try_launch_app(void)
     const uint32_t sector_size = SECTOR_INFO[s].size;
     const uint8_t *sector = (const uint8_t *)sector_start;
 
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Checking sector starting at %p\r\n", sector);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
     /* Search for metadata at 8-byte aligned offsets */
     for (uint32_t offset = 0; offset + sizeof(AppMetadata_t) <= sector_size; offset += 8) {
       const AppMetadata_t *meta = (const AppMetadata_t *)(sector + offset);
 
       if (memcmp(meta->magic, APP_METADATA_MAGIC, APP_METADATA_FIELD_LEN) != 0) continue;
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Magic number found at %p\r\n", meta->magic);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
       if (memcmp(meta->inverted_magic, APP_METADATA_INV_MAGIC, APP_METADATA_FIELD_LEN) != 0) continue;
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Inverted Magic number found at %p\r\n", meta->inverted_magic);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
       if (memcmp(meta->validation, APP_METADATA_VALID, APP_METADATA_FIELD_LEN) != 0) continue;
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Validation found at %p\r\n", meta->validation);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
       if (memcmp(meta->invalidation, APP_METADATA_INVALID, APP_METADATA_FIELD_LEN) != 0) continue;
+
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Invalidation found at %p\r\n", meta->invalidation);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+  }
+#endif
+
 
       /* Metadata found - verify SHA256: sector from start up to (but not including) digest field */
       uint32_t hash_len = offset + (uint32_t)offsetof(AppMetadata_t, sha256);
       uint8_t computed[32];
       sha256_compute(sector, hash_len, computed);
 
-      int match = 1;
+#if BOOTLOADER_DEBUG_ENABLE
+  {
+    char dbg_msg[128];
+    int len = sprintf(dbg_msg, "Hash_len %lu\r\n", hash_len);
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
+    len = sprintf(dbg_msg, "Computed hash ");
+    for (int hash_byte = 0; hash_byte < 32; ++hash_byte)
+    {
+    	sprintf(dbg_msg + strlen(dbg_msg), "%02x", (uint8_t) computed[hash_byte]);
+    }
+    sprintf(dbg_msg + strlen(dbg_msg), "\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, strlen(dbg_msg), 1000);
+    len = sprintf(dbg_msg, "Stored hash   ");
+    for (int hash_byte = 0; hash_byte < 32; ++hash_byte)
+    {
+    	sprintf(dbg_msg + strlen(dbg_msg), "%02x", (uint8_t) meta->sha256[hash_byte]);
+    }
+    sprintf(dbg_msg + strlen(dbg_msg), "\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, strlen(dbg_msg), 1000);
+  }
+#endif
+
+  int match = 1;
       for (int i = 0; i < 32; i++) {
         if (computed[i] != meta->sha256[i]) { match = 0; break; }
       }
@@ -421,16 +835,6 @@ static void bootloader_jump_to_app(uint32_t app_base)
     return;
   }
   
-  if (reset_handler < 0x08060000 || reset_handler > 0x0807FFFF) {
-#if BOOTLOADER_DEBUG_ENABLE
-    {
-      char dbg_msg[128];
-      int len = sprintf(dbg_msg, "WARN: Reset handler outside sector 7: 0x%08lX\r\n", (unsigned long)reset_handler);
-      HAL_UART_Transmit(&huart1, (uint8_t*)dbg_msg, len, 1000);
-    }
-#endif
-  }
-
   /* Deinitialize peripherals before jumping to application */
   HAL_UART_DeInit(&huart1);
   HAL_UART_DeInit(&huart2);
